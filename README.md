@@ -14,7 +14,10 @@ Three subcommands:
 Typical session:
 
   python qa_sweep.py generate
+  
   python qa_sweep.py play
-  # ... place backpack on speaker, start SD-card recorder, run play, stop recorder ...
+  
+  # ... place backpack on speaker, start recording on receiver, run play, stop recorder ...
+  
   python qa_sweep.py analyze received.wav
 
