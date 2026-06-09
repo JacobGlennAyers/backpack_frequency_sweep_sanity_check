@@ -1,7 +1,6 @@
 # backpack_frequency_sweep_sanity_check
 
-Usage - 
-"""
+
 qa_sweep.py
 -----------
 Streamlined single-script QA tool for bird-backpack FM radio transmitters.
@@ -18,4 +17,4 @@ Typical session:
   python qa_sweep.py play
   # ... place backpack on speaker, start SD-card recorder, run play, stop recorder ...
   python qa_sweep.py analyze received.wav
-"""
+
