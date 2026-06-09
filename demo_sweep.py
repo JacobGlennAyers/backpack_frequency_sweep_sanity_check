@@ -38,6 +38,7 @@ import matplotlib.pyplot as plt
 SWEEP_FILE        = "qa_sweep.wav"
 DEMO_RECEIVED     = "demo_received.wav"
 DEMO_REPORT       = "demo_report.png"
+DEMO_SG_REPORT    = "demo_spectrograms.png"
 DEFAULT_FS        = 44100
 DEFAULT_DURATION  = 20.0
 F_MIN, F_MAX      = 20.0, 8000.0
@@ -233,74 +234,65 @@ def _find_cutoff(freqs, response_db, rolloff_db, f_min=30.0):
     return None
 
 
-# ── plot ──────────────────────────────────────────────────────────────────────
+# ── import shared spectrogram helper from qa_sweep ────────────────────────────
+# We do this at function-call time to avoid a hard circular dependency at
+# module load, and fall back gracefully if qa_sweep.py is not on the path.
+
+def _get_triptych_fn():
+    import importlib.util, pathlib
+    here = pathlib.Path(__file__).parent
+    spec = importlib.util.spec_from_file_location(
+        "qa_sweep", here / "qa_sweep.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.plot_spectrogram_triptych
+
+
+# ── main report figure ────────────────────────────────────────────────────────
 
 def _plot(tmpl, received_seg, fs,
           zncc_curve, lags, best_lag, peak_zncc,
           freqs, resp, c3, c6,
-          recording_name: str, out: str):
+          recording_name: str, out: str, sg_out: str):
     """
-    Four-panel figure:
-      1. ZNCC curve with maximum marked
-      2. Spectrograms (sweep vs received)  ← replaces plain PSD
-      3. PSD overlay
-      4. Frequency-response with ±dB markers
+    Two output figures:
+
+    <out>    — 3-panel report: ZNCC (tall) · PSD overlay · freq response
+    <sg_out> — 3-panel spectrogram triptych (via qa_sweep.plot_spectrogram_triptych):
+                 Reference dB mag | Received dB mag | Difference (received − ref)
     """
-    fig = plt.figure(figsize=(18, 9))
+    # ── Figure 1: ZNCC + PSD + freq response ─────────────────────────────────
+    fig = plt.figure(figsize=(15, 5), layout="constrained")
     fig.suptitle(
         f"Bird-Backpack FM QA — {os.path.basename(recording_name)}"
         + (f"   −3 dB: {c3:.0f} Hz" if c3 else "")
         + (f"   −6 dB: {c6:.0f} Hz" if c6 else ""),
-        fontsize=13, fontweight="bold",
+        fontsize=12, fontweight="bold",
     )
 
-    gs = fig.add_gridspec(2, 4, hspace=0.42, wspace=0.38)
+    gs = fig.add_gridspec(1, 3, wspace=0.36)
 
-    # ── Panel 1 (top-left, full height): ZNCC ────────────────────────────────
-    ax_zncc = fig.add_subplot(gs[:, 0])
+    # ZNCC (full height left)
+    ax_zncc = fig.add_subplot(gs[0])
     lag_s = lags / fs
     ax_zncc.plot(lag_s, zncc_curve, color="#7c3aed", lw=0.9, alpha=0.85,
                  label="ZNCC")
     ax_zncc.axvline(best_lag / fs, color="#dc2626", lw=1.4, ls="--",
                     label=f"peak {peak_zncc:.3f}\n@ {best_lag/fs:+.2f} s")
-    ax_zncc.axhline(0,   color="gray", lw=0.5, ls="-")
+    ax_zncc.axhline(0,   color="gray",    lw=0.5)
     ax_zncc.axhline(0.3, color="#ca8a04", lw=0.8, ls=":", label="0.3 threshold")
-    ax_zncc.fill_between(lag_s, zncc_curve,
-                         where=(np.abs(zncc_curve) == np.abs(zncc_curve).max()),
-                         color="#dc2626", alpha=0.6)
+    # shade the single maximum sample
+    peak_mask = np.abs(zncc_curve) == np.abs(zncc_curve).max()
+    ax_zncc.fill_between(lag_s, zncc_curve, where=peak_mask,
+                         color="#dc2626", alpha=0.7)
     ax_zncc.set_xlabel("Lag (s)", fontsize=9)
     ax_zncc.set_ylabel("ZNCC coefficient", fontsize=9)
     ax_zncc.set_title("Zero-Normalised\nCross-Correlation", fontsize=10)
     ax_zncc.legend(fontsize=8, loc="upper left")
     ax_zncc.set_ylim(-1.05, 1.05)
 
-    # ── Panels 2 & 3: spectrograms (top-right two cells) ─────────────────────
-    nperseg_sg = 1024
-    for col, (sig, label, cmap) in enumerate(
-        [(tmpl,         "Reference sweep", "Blues"),
-         (received_seg, "Received (perturbed)", "Reds")],
-        start=1,
-    ):
-        ax = fig.add_subplot(gs[0, col])
-        f_sg, t_sg, Sxx = ss.spectrogram(
-            _normalize(sig).astype(np.float64),
-            fs=fs, nperseg=nperseg_sg, noverlap=nperseg_sg * 3 // 4,
-        )
-        Sxx_db = 10 * np.log10(np.maximum(Sxx, 1e-12))
-        # Normalize spectrogram for display
-        Sxx_db -= Sxx_db.max()
-        im = ax.pcolormesh(t_sg, f_sg / 1000, Sxx_db,
-                           vmin=-50, vmax=0, cmap=cmap,
-                           shading="gouraud", rasterized=True)
-        ax.set_ylim(0, F_MAX / 1000 * 1.05)
-        ax.set_xlabel("Time (s)", fontsize=9)
-        ax.set_ylabel("Frequency (kHz)", fontsize=9)
-        ax.set_title(label, fontsize=10)
-        cb = fig.colorbar(im, ax=ax, pad=0.02)
-        cb.set_label("dB (normalized)", fontsize=7)
-
-    # ── Panel 4 (top far-right): PSD overlay ─────────────────────────────────
-    ax_psd = fig.add_subplot(gs[0, 3])
+    # PSD overlay
+    ax_psd = fig.add_subplot(gs[1])
     f_t, p_t = ss.welch(_normalize(tmpl).astype(np.float64),         fs=fs, nperseg=4096)
     f_r, p_r = ss.welch(_normalize(received_seg).astype(np.float64), fs=fs, nperseg=4096)
     ax_psd.semilogy(f_t / 1000, p_t, color="#2563eb", lw=0.9, label="Sweep (ref)")
@@ -312,8 +304,8 @@ def _plot(tmpl, received_seg, fs,
     ax_psd.set_xlim(0, F_MAX / 1000 * 1.05)
     ax_psd.legend(fontsize=8)
 
-    # ── Panel 5 (bottom, spans cols 1-3): frequency response ─────────────────
-    ax_fr = fig.add_subplot(gs[1, 1:])
+    # Frequency response
+    ax_fr = fig.add_subplot(gs[2])
     valid = ~np.isnan(resp)
     ax_fr.plot(freqs[valid] / 1000, resp[valid], color="#16a34a", lw=1.4,
                label="H(f) estimate")
@@ -331,14 +323,28 @@ def _plot(tmpl, received_seg, fs,
                        color="#16a34a", alpha=0.08)
     ax_fr.set_xlabel("Frequency (kHz)", fontsize=9)
     ax_fr.set_ylabel("Level (dB)", fontsize=9)
-    ax_fr.set_title("Estimated Frequency Response  H(f) = PSD_received / PSD_sweep",
-                    fontsize=10)
+    ax_fr.set_title("Freq. Response  H(f) = PSD_rx / PSD_ref", fontsize=10)
     ax_fr.set_ylim(-40, 10)
     ax_fr.set_xlim(0, F_MAX / 1000 * 1.05)
-    ax_fr.legend(fontsize=8, ncol=3)
+    ax_fr.legend(fontsize=8)
 
     fig.savefig(out, dpi=140, bbox_inches="tight")
     plt.close(fig)
+
+    # ── Figure 2: spectrogram triptych ────────────────────────────────────────
+    try:
+        triptych = _get_triptych_fn()
+    except Exception as e:
+        click.echo(f"⚠  Could not import qa_sweep.py for triptych: {e}", err=True)
+        return
+
+    sg_title = (
+        f"Spectrogram comparison — {os.path.basename(recording_name)}"
+        + (f"   −3 dB: {c3:.0f} Hz" if c3 else "")
+        + (f"   −6 dB: {c6:.0f} Hz" if c6 else "")
+    )
+    triptych(tmpl, received_seg, fs,
+             title=sg_title, out=sg_out, c3=c3, c6=c6)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -354,11 +360,13 @@ def _plot(tmpl, received_seg, fs,
               help="Output path for the perturbed WAV.")
 @click.option("--report", default=DEMO_REPORT,   show_default=True,
               help="Output path for the QA report PNG.")
+@click.option("--sg-out", default=DEMO_SG_REPORT, show_default=True,
+              help="Output path for the spectrogram triptych PNG.")
 @click.option("--sweep",  default=SWEEP_FILE,    show_default=True,
               help="Reference sweep WAV (generate with qa_sweep.py generate).")
 @click.option("--max-lag", default=10.0, show_default=True, type=float,
               help="ZNCC ±search window in seconds.")
-def main(snr, offset, lp, out, report, sweep, max_lag):
+def main(snr, offset, lp, out, report, sg_out, sweep, max_lag):
     """
     Generate a realistically perturbed sweep and run the full QA analysis.
 
@@ -432,8 +440,10 @@ def main(snr, offset, lp, out, report, sweep, max_lag):
           zncc_curve, lags, best_lag, peak_zncc,
           freqs, resp, c3, c6,
           recording_name=out,
-          out=report)
+          out=report,
+          sg_out=sg_out)
     click.echo(f"Report          : {report}")
+    click.echo(f"Spectrograms    : {sg_out}")
 
 
 if __name__ == "__main__":
